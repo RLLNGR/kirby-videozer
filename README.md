@@ -175,4 +175,4 @@ The plugin exposes three authenticated Panel API endpoints:
 
 ## License
 
-MIT — [Nicolas Rollinger](https://rollinger.design)
+MIT — [Nicolas Rollinger](https://rollinger.design) 🫰
