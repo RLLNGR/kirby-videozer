@@ -140,6 +140,8 @@ class Videozer
 
     /**
      * Process a video file: compress MP4, optionally generate WebM, extract poster.
+     * All FFmpeg commands run in a detached background process so PHP returns
+     * immediately and does not block the FastCGI/web-server connection.
      *
      * @param File        $file   The original video file
      * @param string|null $preset Named quality preset (web/high/low) or null for defaults
@@ -156,38 +158,35 @@ class Videozer
         $inputPath  = $file->root();
         $ffmpeg     = $this->ffmpegPath;
         $stripAudio = option('rllngr.videozer.strip_audio', false);
-        $audioOpts  = $stripAudio
-            ? '-an'
-            : '-c:a aac -b:a ' . option('rllngr.videozer.audio_bitrate', '96k');
 
         if (!is_dir($cacheDir)) {
             mkdir($cacheDir, 0755, true);
         }
 
+        $cmds = [];
+
         // 1) Compressed MP4 (H.264/AAC)
         $mp4Final = $this->mp4Path($file);
         if ($force || !file_exists($mp4Final)) {
+            $audioOpts = $stripAudio
+                ? '-an'
+                : '-c:a aac -b:a ' . option('rllngr.videozer.audio_bitrate', '96k');
             $tmp = $cacheDir . '/' . $file->name() . '.tmp.mp4';
-            $cmd = sprintf(
+            $cmds[] = sprintf(
                 '%s -y -i %s -c:v libx264 -preset %s -crf %d -profile:v high -level 4.0'
-                    . ' -vf "scale=min(%d\,iw):-2" %s -movflags +faststart %s 2>&1',
+                    . ' -vf "scale=min(%d\,iw):-2" %s -movflags +faststart %s'
+                    . ' && mv %s %s || rm -f %s',
                 escapeshellcmd($ffmpeg),
                 escapeshellarg($inputPath),
                 $config['ffpreset'],
                 $config['crf'],
                 $config['max_width'],
                 $audioOpts,
+                escapeshellarg($tmp),
+                escapeshellarg($tmp),
+                escapeshellarg($mp4Final),
                 escapeshellarg($tmp)
             );
-            exec($cmd, $out, $ret);
-            $this->log("mp4: code={$ret} | " . implode(' ', array_slice($out, -3)));
-            if ($ret === 0 && file_exists($tmp)) {
-                @unlink($mp4Final);
-                rename($tmp, $mp4Final);
-            } else {
-                @unlink($tmp);
-                throw new \Exception('MP4 conversion failed: ' . implode("\n", array_slice($out, -5)));
-            }
         }
 
         // 2) WebM (VP9/Opus) — optional
@@ -199,32 +198,52 @@ class Videozer
                     : '-c:a libopus -b:a ' . option('rllngr.videozer.webm_audio_bitrate', '64k');
                 $webmCrf = (int) option('rllngr.videozer.webm_crf', 33);
                 $tmp = $cacheDir . '/' . $file->name() . '.tmp.webm';
-                $cmd = sprintf(
-                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d -vf "scale=min(%d\,iw):-2" %s %s 2>&1',
+                $cmds[] = sprintf(
+                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d -vf "scale=min(%d\,iw):-2" %s %s'
+                        . ' && mv %s %s || rm -f %s',
                     escapeshellcmd($ffmpeg),
                     escapeshellarg($inputPath),
                     $webmCrf,
                     $config['max_width'],
                     $webmAudio,
+                    escapeshellarg($tmp),
+                    escapeshellarg($tmp),
+                    escapeshellarg($webmFinal),
                     escapeshellarg($tmp)
                 );
-                exec($cmd, $out, $ret);
-                $this->log("webm: code={$ret} | " . implode(' ', array_slice($out, -3)));
-                if ($ret === 0 && file_exists($tmp)) {
-                    @unlink($webmFinal);
-                    rename($tmp, $webmFinal);
-                } else {
-                    @unlink($tmp);
-                }
             }
         }
 
         // 3) Poster frame
-        $this->generatePoster($file, $force);
+        $posterPath = $this->posterPath($file);
+        if ($force || !file_exists($posterPath)) {
+            // Resolve duration now (quick ffprobe call) before forking
+            $info      = $this->getVideoInfo($file);
+            $duration  = $info['duration'] ?? 0;
+            $timestamp = $duration > 0 ? min(1.0, $duration * 0.1) : 1.0;
+            $maxWidth  = (int) option('rllngr.videozer.max_width', 1920);
+            $tmp       = $posterPath . '.tmp.jpg';
+            $cmds[] = sprintf(
+                '%s -ss %s -y -i %s -vframes 1 -vf "scale=min(%d\,iw):-2" -q:v 2 -update 1 %s'
+                    . ' && mv %s %s || rm -f %s',
+                escapeshellcmd($this->ffmpegPath),
+                number_format($timestamp, 2, '.', ''),
+                escapeshellarg($inputPath),
+                $maxWidth,
+                escapeshellarg($tmp),
+                escapeshellarg($tmp),
+                escapeshellarg($posterPath),
+                escapeshellarg($tmp)
+            );
+        }
+
+        if (!empty($cmds)) {
+            $this->runBackground($cmds);
+        }
     }
 
     /**
-     * Extract a poster frame from the video.
+     * Extract a poster frame from the video (blocking, for direct/manual calls).
      *
      * @param File       $file      The original video file
      * @param bool       $force     Regenerate even if poster already exists
@@ -254,9 +273,9 @@ class Videozer
         $maxWidth = (int) option('rllngr.videozer.max_width', 1920);
         $tmp      = $posterPath . '.tmp.jpg';
         $cmd      = sprintf(
-            '%s -ss %.2f -y -i %s -vframes 1 -vf "scale=min(%d\,iw):-2" -q:v 2 -update 1 %s 2>&1',
+            '%s -ss %s -y -i %s -vframes 1 -vf "scale=min(%d\,iw):-2" -q:v 2 -update 1 %s 2>&1',
             escapeshellcmd($this->ffmpegPath),
-            $timestamp,
+            number_format($timestamp, 2, '.', ''),
             escapeshellarg($file->root()),
             $maxWidth,
             escapeshellarg($tmp)
@@ -269,6 +288,28 @@ class Videozer
         } else {
             @unlink($tmp);
         }
+    }
+
+    /**
+     * Run shell commands as a detached background process (nohup).
+     * PHP returns immediately; FFmpeg continues running after the request ends.
+     *
+     * @param string[] $cmds List of shell commands to run sequentially
+     */
+    protected function runBackground(array $cmds): void
+    {
+        $logFile = dirname(__DIR__) . '/videozer.log';
+        $script  = implode(' ; ', $cmds);
+
+        // Write to a temp script file to avoid nohup/tty issues in FastCGI context
+        $tmpScript = sys_get_temp_dir() . '/videozer_' . uniqid() . '.sh';
+        file_put_contents($tmpScript, "#!/bin/bash\n" . $script . "\nrm -f " . escapeshellarg($tmpScript) . "\n");
+        chmod($tmpScript, 0755);
+
+        $bg = sprintf('bash %s >> %s 2>&1 &', escapeshellarg($tmpScript), escapeshellarg($logFile));
+        $this->log('cmd: ' . $bg);
+        shell_exec($bg);
+        $this->log('background job launched: ' . count($cmds) . ' command(s)');
     }
 
     // ── Video metadata (FFprobe) ───────────────────────────────────────────────
