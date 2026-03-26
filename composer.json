@@ -1,0 +1,25 @@
+{
+    "name": "rllngr/kirby-videozer",
+    "description": "Kirby CMS plugin — compresses uploaded videos with FFmpeg and generates poster frames",
+    "type": "kirby-plugin",
+    "version": "1.0.0",
+    "license": "MIT",
+    "homepage": "https://github.com/rllngr/kirby-videozer",
+    "authors": [
+        {
+            "name": "Nicolas Rollinger",
+            "homepage": "https://rollinger.design"
+        }
+    ],
+    "support": {
+        "source": "https://github.com/rllngr/kirby-videozer",
+        "issues": "https://github.com/rllngr/kirby-videozer/issues"
+    },
+    "require": {
+        "php": ">=8.0",
+        "getkirby/composer-installer": "^1.2"
+    },
+    "extra": {
+        "installer-name": "videozer"
+    }
+}
