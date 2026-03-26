@@ -167,7 +167,7 @@ class Videozer
         // 1) Compressed MP4 (H.264/AAC)
         $mp4Final = $this->mp4Path($file);
         if ($force || !file_exists($mp4Final)) {
-            $tmp = $mp4Final . '.tmp';
+            $tmp = $cacheDir . '/' . $file->name() . '.tmp.mp4';
             $cmd = sprintf(
                 '%s -y -i %s -c:v libx264 -preset %s -crf %d -profile:v high -level 4.0'
                     . ' -vf "scale=min(%d\,iw):-2" %s -movflags +faststart %s 2>&1',
@@ -198,7 +198,7 @@ class Videozer
                     ? '-an'
                     : '-c:a libopus -b:a ' . option('rllngr.videozer.webm_audio_bitrate', '64k');
                 $webmCrf = (int) option('rllngr.videozer.webm_crf', 33);
-                $tmp = $webmFinal . '.tmp';
+                $tmp = $cacheDir . '/' . $file->name() . '.tmp.webm';
                 $cmd = sprintf(
                     '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d -vf "scale=min(%d\,iw):-2" %s %s 2>&1',
                     escapeshellcmd($ffmpeg),
