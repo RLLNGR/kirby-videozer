@@ -13,7 +13,7 @@ The poster is also copied to the page's content directory so Kirby's thumb syste
 
 ## Requirements
 
-- Kirby CMS ^5
+- Kirby CMS ^4 || ^5
 - PHP >=8.0
 - [FFmpeg](https://ffmpeg.org) installed on the server
 
