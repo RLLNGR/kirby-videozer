@@ -7,6 +7,8 @@ A [Kirby CMS](https://getkirby.com) plugin that automatically compresses uploade
 - `{name}-opt.webm` — VP9/Opus WebM variant (optional)
 - `{name}-poster.jpg` — Thumbnail extracted at 1 second (or 10% of duration)
 
+The poster is also copied to the page's content directory so Kirby's thumb system can generate srcset variants and the Panel can show a video preview image. The video's orientation (`portrait`/`landscape`/`square`) is auto-detected from its dimensions and saved as a content field on upload.
+
 ---
 
 ## Requirements
@@ -114,14 +116,24 @@ $file->videozUrl()
 // WebM URL if generated, null otherwise
 $file->videozWebmUrl()
 
-// Poster URL if generated, null otherwise
+// Poster URL — always returns the expected URL (browser handles 404 gracefully via @error)
 $file->videozPosterUrl()
+
+// Srcset for the poster frame via Kirby's thumb system (requires content-dir copy to exist)
+$file->videozPosterSrcset()
 
 // Whether a compressed MP4 exists in the cache
 $file->hasVideoz()
 
 // Whether a poster exists in the cache
 $file->videozHasPoster()
+
+// Orientation string: 'portrait', 'landscape', or 'square'
+// Returns the saved panel value if set, otherwise auto-detects from ffprobe/image dimensions
+$file->videozOrientation()
+
+// Panel image for use with `image.query` — returns poster for videos, self for images, null otherwise
+$file->videozPanelImage()
 
 // FFprobe metadata: duration, size, bitrate, width, height, codec, fps, hasAudio
 $file->videozInfo()
@@ -169,7 +181,8 @@ The plugin exposes three authenticated Panel API endpoints:
 
 - Check `site/plugins/videozer/videozer.log` for processing errors.
 - If FFmpeg is not found, set `rllngr.videozer.ffmpeg` to the full binary path.
-- Processing is synchronous — large files will block the request. Use `/api/videozer/optimize-all` for batch processing outside of uploads.
+- Uploads trigger `processBackground()` — FFmpeg runs in a detached shell so the Panel request returns immediately. The poster and srcset will appear once the background job completes.
+- The API routes (`/api/videozer/optimize`, `/api/videozer/optimize-all`) use the synchronous `process()` method — suited for scripts and manual re-processing.
 
 ---
 
