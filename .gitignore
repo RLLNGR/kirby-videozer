@@ -1,0 +1,9 @@
+# Logs
+*.log
+.loaded
+
+# Composer
+vendor/
+
+# OS
+.DS_Store
