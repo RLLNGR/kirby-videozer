@@ -26,7 +26,7 @@ F::loadClasses([
 
 App::plugin('rllngr/videozer', [
     'info' => [
-        'version' => '1.0.0',
+        'version' => '1.1.0',
     ],
 
     'options' => [
@@ -88,7 +88,19 @@ App::plugin('rllngr/videozer', [
                     }
                 }
 
-                $vz->process($file);
+                // Auto-save orientation from video dimensions (ffprobe, fast)
+                if (!$file->content()->get('orientation')->isNotEmpty()) {
+                    try {
+                        $orientation = $vz->detectOrientation($file);
+                        kirby()->impersonate('kirby', function () use ($file, $orientation) {
+                            $file->update(['orientation' => $orientation]);
+                        });
+                    } catch (\Throwable $e) {
+                        error_log('Videozer: orientation detect error: ' . $e->getMessage());
+                    }
+                }
+
+                $vz->processBackground($file);
 
             } catch (\Throwable $e) {
                 error_log('Videozer: file.create:after error: ' . $e->getMessage());
@@ -105,8 +117,18 @@ App::plugin('rllngr/videozer', [
                 if (!$vz->matchesTemplate($file)) return;
                 if (!$vz->isAvailable()) return;
 
+                // Re-detect orientation when file is replaced
+                try {
+                    $orientation = $vz->detectOrientation($file);
+                    kirby()->impersonate('kirby', function () use ($file, $orientation) {
+                        $file->update(['orientation' => $orientation]);
+                    });
+                } catch (\Throwable $e) {
+                    error_log('Videozer: orientation detect error: ' . $e->getMessage());
+                }
+
                 // Force re-process: replace cached files
-                $vz->process($file, null, true);
+                $vz->processBackground($file, null, true);
 
             } catch (\Throwable $e) {
                 error_log('Videozer: file.replace:after error: ' . $e->getMessage());
@@ -150,6 +172,7 @@ App::plugin('rllngr/videozer', [
     'fileMethods' => [
 
         // Best available MP4 URL: compressed if cached, original otherwise.
+        /** @kql-allowed */
         'videozUrl' => function (): string {
             $vz = new \Rllngr\Videozer\Videozer();
             return $vz->hasMp4($this)
@@ -158,25 +181,82 @@ App::plugin('rllngr/videozer', [
         },
 
         // Best available WebM URL, or null if not generated.
+        /** @kql-allowed */
         'videozWebmUrl' => function (): ?string {
             $vz = new \Rllngr\Videozer\Videozer();
             return $vz->hasWebm($this) ? $vz->webmUrl($this) : null;
         },
 
-        // Poster URL, or null if not generated.
+        // Poster URL. Always returns the expected URL — the browser handles 404 via @error.
+        // Avoids file_exists() returning false due to filesystem/cache timing issues.
+        /** @kql-allowed */
         'videozPosterUrl' => function (): ?string {
-            $vz = new \Rllngr\Videozer\Videozer();
-            return $vz->hasPoster($this) ? $vz->posterUrl($this) : null;
+            if ($this->type() !== 'video') return null;
+            return (new \Rllngr\Videozer\Videozer())->posterUrl($this);
+        },
+
+        // Srcset for the poster frame using Kirby's thumb system (via content-dir copy).
+        // Falls back to null if the poster hasn't been extracted yet.
+        /** @kql-allowed */
+        'videozPosterSrcset' => function (): ?string {
+            if ($this->type() !== 'video') return null;
+            $posterFile = $this->parent()->image($this->name() . '-poster.jpg');
+            return $posterFile ? $posterFile->srcset() : null;
         },
 
         // Whether a compressed MP4 exists in the cache.
+        /** @kql-allowed */
         'hasVideoz' => function (): bool {
             return (new \Rllngr\Videozer\Videozer())->hasMp4($this);
         },
 
         // Whether a poster exists in the cache.
+        /** @kql-allowed */
         'videozHasPoster' => function (): bool {
             return (new \Rllngr\Videozer\Videozer())->hasPoster($this);
+        },
+
+        // Returns the image to display in the panel for image.query.
+        // For videos: returns the poster frame (copied to content dir by videozer).
+        // For images: returns the file itself so Kirby shows the image preview.
+        // Returns null for other types (Kirby shows default icon).
+        'videozPanelImage' => function (): ?\Kirby\Cms\File {
+            if ($this->type() === 'video') {
+                $posterFilename = $this->name() . '-poster.jpg';
+                return $this->parent()->image($posterFilename);
+            }
+            if ($this->type() === 'image') {
+                return $this;
+            }
+            return null;
+        },
+
+        // Orientation string ('portrait'|'landscape'|'square').
+        // Returns the user-set panel value if present, otherwise auto-detects:
+        // - Images: from Kirby's built-in width/height
+        // - Videos: from ffprobe (fast metadata-only read, ~100ms)
+        /** @kql-allowed */
+        'videozOrientation' => function (): string {
+            $stored = $this->content()->get('orientation')->value();
+            if ($stored) return $stored;
+
+            if ($this->type() === 'image') {
+                return \Rllngr\Videozer\Videozer::orientationFromDimensions(
+                    (int) $this->width(),
+                    (int) $this->height()
+                );
+            }
+
+            if ($this->type() === 'video') {
+                $vz   = new \Rllngr\Videozer\Videozer();
+                $info = $vz->getVideoInfo($this);
+                return \Rllngr\Videozer\Videozer::orientationFromDimensions(
+                    (int) ($info['width'] ?? 0),
+                    (int) ($info['height'] ?? 0)
+                );
+            }
+
+            return 'landscape';
         },
 
         // FFprobe metadata for this video.
