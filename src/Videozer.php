@@ -103,7 +103,13 @@ class Videozer
 
     public function posterPath(File $file): string
     {
-        return $this->cacheDir($file) . '/' . $file->name() . '-poster.jpg';
+        return $this->cacheDir($file) . '/' . $file->name() . '-poster.' . $this->posterExtension();
+    }
+
+    protected function posterExtension(): string
+    {
+        if (option('rllngr.videozer.alpha_support', false)) return 'png';
+        return option('rllngr.videozer.poster_format', 'jpg');
     }
 
     public function mp4Url(File $file): string
@@ -118,7 +124,7 @@ class Videozer
 
     public function posterUrl(File $file): string
     {
-        return $this->cacheUrl($file) . '/' . $file->name() . '-poster.jpg';
+        return $this->cacheUrl($file) . '/' . $file->name() . '-poster.' . $this->posterExtension();
     }
 
     public function hasMp4(File $file): bool
@@ -134,6 +140,36 @@ class Videozer
     public function hasPoster(File $file): bool
     {
         return file_exists($this->posterPath($file));
+    }
+
+    public function hevcPath(File $file): string
+    {
+        return $this->cacheDir($file) . '/' . $file->name() . '-hevc.mov';
+    }
+
+    public function hevcUrl(File $file): string
+    {
+        return $this->cacheUrl($file) . '/' . $file->name() . '-hevc.mov';
+    }
+
+    public function hasHevc(File $file): bool
+    {
+        return file_exists($this->hevcPath($file));
+    }
+
+    public function lastFramePath(File $file): string
+    {
+        return $this->cacheDir($file) . '/' . $file->name() . '-last.' . $this->posterExtension();
+    }
+
+    public function lastFrameUrl(File $file): string
+    {
+        return $this->cacheUrl($file) . '/' . $file->name() . '-last.' . $this->posterExtension();
+    }
+
+    public function hasLastFrame(File $file): bool
+    {
+        return file_exists($this->lastFramePath($file));
     }
 
     // ── Main processing ────────────────────────────────────────────────────────
@@ -193,19 +229,31 @@ class Videozer
         }
 
         // 2) WebM (VP9/Opus) — optional
-        if (option('rllngr.videozer.generate_webm', true)) {
+        // Skip re-encoding when the source IS already a WebM with alpha channel.
+        // The source file is already in the correct format for browsers —
+        // videozWebmUrl returns $file->url() in this case.
+        // Use -vcodec libvpx-vp9 (software decoder) to preserve BlockAdditional alpha
+        // when needed for HEVC/poster/last-frame generation.
+        // For MOV with alpha (Apple HEVC alpha): generate a WebM VP9 with alpha for Chrome/Firefox.
+        $sourceIsAlphaWebm = strtolower($file->extension()) === 'webm' && $this->hasAlpha($file);
+        $sourceIsAlphaMov  = strtolower($file->extension()) === 'mov'  && $this->hasAlpha($file);
+        $decoderFlag       = $sourceIsAlphaWebm ? '-vcodec libvpx-vp9' : '';
+
+        if (option('rllngr.videozer.generate_webm', true) && !$sourceIsAlphaWebm) {
             $webmFinal = $this->webmPath($file);
             if ($force || !file_exists($webmFinal)) {
                 $webmAudio = $stripAudio
                     ? '-an'
                     : '-c:a libopus -b:a ' . option('rllngr.videozer.webm_audio_bitrate', '64k');
-                $webmCrf = (int) option('rllngr.videozer.webm_crf', 33);
+                $webmCrf    = (int) option('rllngr.videozer.webm_crf', 33);
+                $alphaFlags = $this->hasAlpha($file) ? '-pix_fmt yuva420p -auto-alt-ref 0' : '';
                 $tmp = $webmFinal . '.tmp';
                 $cmd = sprintf(
-                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d -vf "scale=min(%d\,iw):-2" %s -f webm %s 2>&1',
+                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d %s -vf "scale=min(%d\,iw):-2" %s -f webm %s 2>&1',
                     escapeshellcmd($ffmpeg),
                     escapeshellarg($inputPath),
                     $webmCrf,
+                    $alphaFlags,
                     $config['max_width'],
                     $webmAudio,
                     escapeshellarg($tmp)
@@ -219,10 +267,39 @@ class Videozer
                     @unlink($tmp);
                 }
             }
+        } elseif ($sourceIsAlphaWebm) {
+            $this->log("webm: skipped — source is WebM with alpha, serving original directly");
         }
 
-        // 3) Poster frame
+        // 3) HEVC Alpha MOV — optional, WebM sources only (Safari alpha support)
+        // alpha_support:true auto-enables this; generate_hevc_alpha:true also triggers it.
+        // For alpha WebM: use -vcodec libvpx-vp9 to properly decode BlockAdditional alpha.
+        $wantsHevc = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_alpha', false);
+        if ($wantsHevc && strtolower($file->extension()) === 'webm') {
+            $hevcFinal = $this->hevcPath($file);
+            if ($force || !file_exists($hevcFinal)) {
+                $tmp = $hevcFinal . '.tmp';
+                $cmd = sprintf(
+                    '%s -y %s -i %s -vf "format=yuva420p" -vcodec hevc_videotoolbox -allow_sw 1 -alpha_quality 0.75 -an -tag:v hvc1 -f mov %s 2>&1',
+                    escapeshellcmd($ffmpeg),
+                    $decoderFlag,
+                    escapeshellarg($inputPath),
+                    escapeshellarg($tmp)
+                );
+                exec($cmd, $out, $ret);
+                $this->log("hevc: code={$ret} | " . implode(' ', array_slice($out, -3)));
+                if ($ret === 0 && file_exists($tmp)) {
+                    @unlink($hevcFinal);
+                    rename($tmp, $hevcFinal);
+                } else {
+                    @unlink($tmp);
+                }
+            }
+        }
+
+        // 4) Poster frame + last frame
         $this->generatePoster($file, $force);
+        $this->generateLastFrame($file, $force);
     }
 
     /**
@@ -271,38 +348,91 @@ class Videozer
         }
 
         // 2) WebM (VP9) — optional
-        if (option('rllngr.videozer.generate_webm', true)) {
+        // Skip for sources that are already WebM with alpha (served directly as-is).
+        // For MOV with alpha (Apple HEVC alpha): generate a WebM VP9 with alpha for Chrome/Firefox.
+        $sourceIsAlphaWebm = strtolower($file->extension()) === 'webm' && $this->hasAlpha($file);
+        $sourceIsAlphaMov  = strtolower($file->extension()) === 'mov'  && $this->hasAlpha($file);
+        $decoderFlag       = $sourceIsAlphaWebm ? '-vcodec libvpx-vp9' : '';
+
+        if (option('rllngr.videozer.generate_webm', true) && !$sourceIsAlphaWebm) {
             $webmFinal = $this->webmPath($file);
             if ($force || !file_exists($webmFinal)) {
-                $webmCrf   = (int) option('rllngr.videozer.webm_crf', 33);
-                $webmAudio = $stripAudio
+                $webmCrf    = (int) option('rllngr.videozer.webm_crf', 33);
+                $webmAudio  = $stripAudio
                     ? '-an'
                     : '-c:a libopus -b:a ' . option('rllngr.videozer.webm_audio_bitrate', '64k');
+                $alphaFlags = $this->hasAlpha($file) ? '-pix_fmt yuva420p -auto-alt-ref 0' : '';
                 $tmp = escapeshellarg($webmFinal . '.tmp');
                 $out = escapeshellarg($webmFinal);
                 $parts[] = sprintf(
-                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d -vf "scale=min(%d\,iw):-2" %s -f webm %s'
+                    '%s -y -i %s -c:v libvpx-vp9 -b:v 0 -crf %d %s -vf "scale=min(%d\,iw):-2" %s -f webm %s'
                         . ' && mv -f %s %s',
                     $ffmpeg, escapeshellarg($inputPath),
-                    $webmCrf, $config['max_width'],
+                    $webmCrf, $alphaFlags, $config['max_width'],
                     $webmAudio, $tmp, $tmp, $out
+                );
+            }
+        } elseif ($sourceIsAlphaWebm) {
+            $this->log("webm: skipped — source is WebM with alpha, serving original directly");
+        }
+
+        // 3) HEVC Alpha MOV — optional, WebM sources only
+        // alpha_support:true auto-enables this; generate_hevc_alpha:true also triggers it.
+        // For alpha WebM: use libvpx-vp9 to properly decode BlockAdditional alpha.
+        $wantsHevc = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_alpha', false);
+        if ($wantsHevc && strtolower($file->extension()) === 'webm') {
+            $hevcFinal = $this->hevcPath($file);
+            if ($force || !file_exists($hevcFinal)) {
+                $tmp = escapeshellarg($hevcFinal . '.tmp');
+                $out = escapeshellarg($hevcFinal);
+                $parts[] = sprintf(
+                    '%s -y %s -i %s -vf "format=yuva420p" -vcodec hevc_videotoolbox -allow_sw 1 -alpha_quality 0.75 -an -tag:v hvc1 -f mov %s'
+                        . ' && mv -f %s %s',
+                    $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
+                    $tmp, $tmp, $out
                 );
             }
         }
 
-        // 3) Poster frame (use fixed 1s timestamp to avoid needing ffprobe)
+        // 4) Poster frame (use fixed 1s timestamp to avoid needing ffprobe)
         // Also copy to the page's content directory so Kirby can use it as a panel preview image.
+        // For alpha WebM: use libvpx-vp9 software decoder to preserve transparency.
         $posterPath    = $this->posterPath($file);
-        $contentPoster = escapeshellarg($file->parent()->root() . '/' . $file->name() . '-poster.jpg');
+        $ext           = $this->posterExtension();
+        $contentPoster = escapeshellarg($file->parent()->root() . '/' . $file->name() . '-poster.' . $ext);
         if ($force || !file_exists($posterPath)) {
-            $maxWidth = (int) option('rllngr.videozer.max_width', 1920);
-            $tmp      = escapeshellarg($posterPath . '.tmp.jpg');
-            $out      = escapeshellarg($posterPath);
-            $parts[]  = sprintf(
-                '%s -ss 1.0 -y -i %s -vframes 1 -vf "scale=min(%d\,iw):-2" -q:v 2 -update 1 -f image2 %s'
+            $maxWidth                   = (int) option('rllngr.videozer.max_width', 1920);
+            [$qualityFlag, $formatFlag] = $ext === 'webp' ? ['-q:v 85', '-f webp'] : ['-q:v 2', '-f image2'];
+            $scaleFilter = in_array($ext, ['png', 'webp'])
+                ? "scale=min(%d\\,iw):-2,format=rgba"
+                : "scale=min(%d\\,iw):-2";
+            $tmp     = escapeshellarg($posterPath . '.tmp.' . $ext);
+            $out     = escapeshellarg($posterPath);
+            $parts[] = sprintf(
+                '%s -ss 1.0 -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s'
                     . ' && mv -f %s %s && cp -f %s %s',
-                $ffmpeg, escapeshellarg($inputPath),
-                $maxWidth, $tmp, $tmp, $out, $out, $contentPoster
+                $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
+                $maxWidth, $qualityFlag, $formatFlag, $tmp, $tmp, $out, $out, $contentPoster
+            );
+        }
+
+        // 5) Last frame (-sseof seek from end, no ffprobe needed)
+        // For alpha WebM: use libvpx-vp9 software decoder to preserve transparency.
+        $lastPath    = $this->lastFramePath($file);
+        $contentLast = escapeshellarg($file->parent()->root() . '/' . $file->name() . '-last.' . $ext);
+        if ($force || !file_exists($lastPath)) {
+            $maxWidth                   = (int) option('rllngr.videozer.max_width', 1920);
+            [$qualityFlag, $formatFlag] = $ext === 'webp' ? ['-q:v 85', '-f webp'] : ['-q:v 2', '-f image2'];
+            $scaleFilter = in_array($ext, ['png', 'webp'])
+                ? "scale=min(%d\\,iw):-2,format=rgba"
+                : "scale=min(%d\\,iw):-2";
+            $tmp     = escapeshellarg($lastPath . '.tmp.' . $ext);
+            $out     = escapeshellarg($lastPath);
+            $parts[] = sprintf(
+                '%s -sseof -0.1 -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s'
+                    . ' && mv -f %s %s && cp -f %s %s',
+                $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
+                $maxWidth, $qualityFlag, $formatFlag, $tmp, $tmp, $out, $out, $contentLast
             );
         }
 
@@ -351,14 +481,27 @@ class Videozer
             $timestamp = $duration > 0 ? min(1.0, $duration * 0.1) : 1.0;
         }
 
-        $maxWidth = (int) option('rllngr.videozer.max_width', 1920);
-        $tmp      = $posterPath . '.tmp.jpg';
-        $cmd      = sprintf(
-            '%s -ss %.2f -y -i %s -vframes 1 -vf "scale=min(%d\,iw):-2" -q:v 2 -update 1 -f image2 %s 2>&1',
+        $maxWidth    = (int) option('rllngr.videozer.max_width', 1920);
+        $ext         = $this->posterExtension();
+        $tmp         = $posterPath . '.tmp.' . $ext;
+        $decoderFlag = strtolower($file->extension()) === 'webm' && $this->hasAlpha($file)
+            ? '-vcodec libvpx-vp9'
+            : '';
+        [$qualityFlag, $formatFlag] = $ext === 'webp'
+            ? ['-q:v 85', '-f webp']
+            : ['-q:v 2',  '-f image2'];
+        $scaleFilter = in_array($ext, ['png', 'webp'])
+            ? 'scale=min(%d\,iw):-2,format=rgba'
+            : 'scale=min(%d\,iw):-2';
+        $cmd = sprintf(
+            '%s -ss %.2f -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s 2>&1',
             escapeshellcmd($this->ffmpegPath),
             $timestamp,
+            $decoderFlag,
             escapeshellarg($file->root()),
             $maxWidth,
+            $qualityFlag,
+            $formatFlag,
             escapeshellarg($tmp)
         );
         exec($cmd, $out, $ret);
@@ -367,8 +510,63 @@ class Videozer
             @unlink($posterPath);
             rename($tmp, $posterPath);
             // Copy to page content directory for Kirby panel preview and srcset
-            $contentPoster = $file->parent()->root() . '/' . $file->name() . '-poster.jpg';
+            $contentPoster = $file->parent()->root() . '/' . $file->name() . '-poster.' . $ext;
             @copy($posterPath, $contentPoster);
+        } else {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * Extract the last frame of the video.
+     * Uses -sseof to seek from the end — no ffprobe required.
+     * Also copies to the page content directory alongside the poster.
+     */
+    public function generateLastFrame(File $file, bool $force = false): void
+    {
+        if (!$this->isAvailable()) {
+            throw new \Exception('FFmpeg is not available');
+        }
+
+        $lastPath = $this->lastFramePath($file);
+
+        if (!$force && file_exists($lastPath)) return;
+
+        $cacheDir = $this->cacheDir($file);
+        if (!is_dir($cacheDir)) {
+            mkdir($cacheDir, 0755, true);
+        }
+
+        $maxWidth    = (int) option('rllngr.videozer.max_width', 1920);
+        $ext         = $this->posterExtension();
+        $tmp         = $lastPath . '.tmp.' . $ext;
+        $decoderFlag = strtolower($file->extension()) === 'webm' && $this->hasAlpha($file)
+            ? '-vcodec libvpx-vp9'
+            : '';
+        [$qualityFlag, $formatFlag] = $ext === 'webp'
+            ? ['-q:v 85', '-f webp']
+            : ['-q:v 2',  '-f image2'];
+        $scaleFilter = in_array($ext, ['png', 'webp'])
+            ? 'scale=min(%d\,iw):-2,format=rgba'
+            : 'scale=min(%d\,iw):-2';
+
+        $cmd = sprintf(
+            '%s -sseof -0.1 -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s 2>&1',
+            escapeshellcmd($this->ffmpegPath),
+            $decoderFlag,
+            escapeshellarg($file->root()),
+            $maxWidth,
+            $qualityFlag,
+            $formatFlag,
+            escapeshellarg($tmp)
+        );
+        exec($cmd, $out, $ret);
+        $this->log("last-frame: code={$ret} | " . implode(' ', array_slice($out, -3)));
+        if ($ret === 0 && file_exists($tmp)) {
+            @unlink($lastPath);
+            rename($tmp, $lastPath);
+            $contentLast = $file->parent()->root() . '/' . $file->name() . '-last.' . $ext;
+            @copy($lastPath, $contentLast);
         } else {
             @unlink($tmp);
         }
@@ -451,23 +649,62 @@ class Videozer
 
     public function deleteCached(File $file): void
     {
-        foreach ([$this->mp4Path($file), $this->webmPath($file), $this->posterPath($file)] as $path) {
+        foreach ([$this->mp4Path($file), $this->webmPath($file), $this->hevcPath($file), $this->posterPath($file), $this->lastFramePath($file)] as $path) {
             if (file_exists($path)) {
                 @unlink($path);
                 $this->log("Deleted: {$path}");
             }
         }
 
-        // Also remove the content-directory copy of the poster
-        $contentPoster = $file->parent()->root() . '/' . $file->name() . '-poster.jpg';
-        if (file_exists($contentPoster)) {
-            @unlink($contentPoster);
+        // Also remove content-directory copies (poster + last frame) and their Kirby meta .txt files
+        $ext = $this->posterExtension();
+        foreach (['-poster', '-last'] as $suffix) {
+            $contentFile = $file->parent()->root() . '/' . $file->name() . $suffix . '.' . $ext;
+            if (file_exists($contentFile)) @unlink($contentFile);
+            if (file_exists($contentFile . '.txt')) @unlink($contentFile . '.txt');
         }
 
         $cacheDir = $this->cacheDir($file);
         if (is_dir($cacheDir) && count(glob($cacheDir . '/*')) === 0) {
             @rmdir($cacheDir);
         }
+    }
+
+    // ── Alpha detection ────────────────────────────────────────────────────────
+
+    /**
+     * Returns true if the source video has an alpha channel.
+     * Detects VP9 alpha_mode, yuva pixel formats, and Apple HEVC alpha MOV
+     * (which stores color and alpha as two separate video streams).
+     */
+    public function hasAlpha(File $file): bool
+    {
+        if (!$this->isAvailable()) return false;
+        $ffprobePath = str_replace('ffmpeg', 'ffprobe', $this->ffmpegPath);
+        $cmd = sprintf(
+            '%s -v quiet -print_format json -show_streams %s 2>/dev/null',
+            $ffprobePath,
+            escapeshellarg($file->root())
+        );
+        $output = shell_exec($cmd);
+        if (!$output) return false;
+        $info = json_decode($output, true);
+
+        $videoStreams = array_values(array_filter(
+            $info['streams'] ?? [],
+            fn($s) => $s['codec_type'] === 'video'
+        ));
+
+        // Apple HEVC alpha MOV: color and alpha are stored as two separate video streams
+        if (strtolower($file->extension()) === 'mov' && count($videoStreams) >= 2) return true;
+
+        foreach ($videoStreams as $stream) {
+            // VP9 alpha flag
+            if (($stream['tags']['alpha_mode'] ?? '') === '1') return true;
+            // Pixel formats with alpha (yuva420p, yuva444p, ayuv64le, …)
+            if (isset($stream['pix_fmt']) && str_contains($stream['pix_fmt'], 'a')) return true;
+        }
+        return false;
     }
 
     // ── Template filter ────────────────────────────────────────────────────────

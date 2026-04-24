@@ -26,10 +26,14 @@ F::loadClasses([
 
 App::plugin('rllngr/videozer', [
     'info' => [
-        'version' => '1.1.0',
+        'version' => '1.2.0',
     ],
 
     'options' => [
+        // Master switch for transparency support.
+        // When true: poster/last-frame format forced to 'png', HEVC alpha auto-enabled for WebM uploads,
+        // and MOV uploads with alpha automatically generate a VP9/WebM variant for Chrome/Firefox.
+        'alpha_support'      => false,
         // Path to the ffmpeg binary. Defaults to 'ffmpeg' (resolved via PATH).
         'ffmpeg'             => 'ffmpeg',
         // Named quality preset to use by default (web/high/low). null = use individual options.
@@ -50,6 +54,13 @@ App::plugin('rllngr/videozer', [
         'audio_bitrate'      => '96k',
         // Whether to also generate a VP9/WebM variant.
         'generate_webm'      => true,
+        // Poster frame format: 'jpg', 'png', or 'webp'. Use 'webp' or 'png' to preserve alpha.
+        // Overridden to 'png' automatically when alpha_support is true.
+        'poster_format'      => 'jpg',
+        // Convert WebM (with alpha) to HEVC H.265 MOV for Safari alpha-channel support.
+        // Uses hevc_videotoolbox (macOS hardware). Only triggers on .webm uploads.
+        // Enabled automatically when alpha_support is true.
+        'generate_hevc_alpha' => false,
         // WebM CRF quality.
         'webm_crf'           => 33,
         // WebM audio bitrate (ignored when strip_audio is true).
@@ -135,6 +146,33 @@ App::plugin('rllngr/videozer', [
             }
         },
 
+        'file.delete:after' => function (File $file) {
+            try {
+                // Safety net: remove any orphaned Kirby .txt meta files left behind
+                // after deleting the video and its generated variants (poster, last frame).
+                // Kirby normally cleans up the video's own .txt, but generated files
+                // copied to the content directory may leave orphaned .txt behind.
+                $page = $file->parent();
+                if (!$page) return;
+
+                $contentDir = $page->root();
+                if (!is_dir($contentDir)) return;
+
+                foreach (glob($contentDir . '/*.txt') as $txtFile) {
+                    $basename = basename($txtFile, '.txt');
+                    // Skip the page's own content file (e.g. project.txt)
+                    if ($basename === $page->slug() || $basename === $page->template()->name()) continue;
+                    // If no corresponding file exists → orphan → delete
+                    if (!file_exists($contentDir . '/' . $basename)) {
+                        @unlink($txtFile);
+                        error_log('Videozer: file.delete:after — removed orphaned meta: ' . basename($txtFile));
+                    }
+                }
+            } catch (\Throwable $e) {
+                error_log('Videozer: file.delete:after error: ' . $e->getMessage());
+            }
+        },
+
         'file.delete:before' => function (File $file) {
             try {
                 if ($file->type() !== 'video') return;
@@ -181,10 +219,30 @@ App::plugin('rllngr/videozer', [
         },
 
         // Best available WebM URL, or null if not generated.
+        // When the source IS already a WebM with alpha, return the source URL directly —
+        // ffmpeg 8.x strips VP9 BlockAdditional alpha during re-encoding, so the generated
+        // opt.webm would lose transparency. Browsers handle the original file correctly.
         /** @kql-allowed */
         'videozWebmUrl' => function (): ?string {
             $vz = new \Rllngr\Videozer\Videozer();
+            if (strtolower($this->extension()) === 'webm' && $vz->hasAlpha($this)) {
+                return $this->url();
+            }
             return $vz->hasWebm($this) ? $vz->webmUrl($this) : null;
+        },
+
+        // Last frame URL (same format as poster), or null if not generated yet.
+        /** @kql-allowed */
+        'videozLastFrameUrl' => function (): ?string {
+            $vz = new \Rllngr\Videozer\Videozer();
+            return $vz->hasLastFrame($this) ? $vz->lastFrameUrl($this) : null;
+        },
+
+        // HEVC H.265 MOV URL for Safari alpha-channel support, or null if not generated.
+        /** @kql-allowed */
+        'videozHevcUrl' => function (): ?string {
+            $vz = new \Rllngr\Videozer\Videozer();
+            return $vz->hasHevc($this) ? $vz->hevcUrl($this) : null;
         },
 
         // Poster URL. Always returns the expected URL — the browser handles 404 via @error.
@@ -200,7 +258,8 @@ App::plugin('rllngr/videozer', [
         /** @kql-allowed */
         'videozPosterSrcset' => function (): ?string {
             if ($this->type() !== 'video') return null;
-            $posterFile = $this->parent()->image($this->name() . '-poster.jpg');
+            $ext        = option('rllngr.videozer.poster_format', 'jpg');
+            $posterFile = $this->parent()->image($this->name() . '-poster.' . $ext);
             return $posterFile ? $posterFile->srcset() : null;
         },
 
@@ -222,7 +281,8 @@ App::plugin('rllngr/videozer', [
         // Returns null for other types (Kirby shows default icon).
         'videozPanelImage' => function (): ?\Kirby\Cms\File {
             if ($this->type() === 'video') {
-                $posterFilename = $this->name() . '-poster.jpg';
+                $ext            = option('rllngr.videozer.poster_format', 'jpg');
+                $posterFilename = $this->name() . '-poster.' . $ext;
                 return $this->parent()->image($posterFilename);
             }
             if ($this->type() === 'image') {
@@ -284,7 +344,7 @@ App::plugin('rllngr/videozer', [
         //  in $page->files() — but this guard handles any edge case.)
         'videozFiles' => function () {
             return $this->files()->filter(function ($file) {
-                return !preg_match('/(-compressed\.mp4|-opt\.webm|-poster\.jpg)$/', $file->filename());
+                return !preg_match('/(-compressed\.mp4|-opt\.webm|-hevc\.mov|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/', $file->filename());
             });
         },
     ],
@@ -354,6 +414,7 @@ App::plugin('rllngr/videozer', [
                             'original' => $file->url(),
                             'mp4'      => $vz->hasMp4($file) ? $vz->mp4Url($file) : null,
                             'webm'     => $vz->hasWebm($file) ? $vz->webmUrl($file) : null,
+                            'hevc'     => $vz->hasHevc($file) ? $vz->hevcUrl($file) : null,
                             'poster'   => $vz->hasPoster($file) ? $vz->posterUrl($file) : null,
                         ];
                     } catch (\Exception $e) {
