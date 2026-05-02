@@ -157,6 +157,36 @@ class Videozer
         return file_exists($this->hevcPath($file));
     }
 
+    public function hevcStackedPath(File $file): string
+    {
+        return $this->cacheDir($file) . '/' . $file->name() . '-hevc-stacked.mp4';
+    }
+
+    public function hevcStackedUrl(File $file): string
+    {
+        return $this->cacheUrl($file) . '/' . $file->name() . '-hevc-stacked.mp4';
+    }
+
+    public function hasHevcStacked(File $file): bool
+    {
+        return file_exists($this->hevcStackedPath($file));
+    }
+
+    public function av1Path(File $file): string
+    {
+        return $this->cacheDir($file) . '/' . $file->name() . '-av1-stacked.mp4';
+    }
+
+    public function av1Url(File $file): string
+    {
+        return $this->cacheUrl($file) . '/' . $file->name() . '-av1-stacked.mp4';
+    }
+
+    public function hasAv1(File $file): bool
+    {
+        return file_exists($this->av1Path($file));
+    }
+
     public function lastFramePath(File $file): string
     {
         return $this->cacheDir($file) . '/' . $file->name() . '-last.' . $this->posterExtension();
@@ -271,26 +301,54 @@ class Videozer
             $this->log("webm: skipped — source is WebM with alpha, serving original directly");
         }
 
-        // 3) HEVC Alpha MOV — optional, WebM sources only (Safari alpha support)
-        // alpha_support:true auto-enables this; generate_hevc_alpha:true also triggers it.
-        // For alpha WebM: use -vcodec libvpx-vp9 to properly decode BlockAdditional alpha.
-        $wantsHevc = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_alpha', false);
-        if ($wantsHevc && strtolower($file->extension()) === 'webm') {
-            $hevcFinal = $this->hevcPath($file);
-            if ($force || !file_exists($hevcFinal)) {
-                $tmp = $hevcFinal . '.tmp';
+        // 3) HEVC stacked (libx265, cross-platform) — optional, WebM sources only
+        // Encodes colour+alpha as a double-height video (colour on top, greyscale alpha on bottom).
+        // Replaces the old hevc_videotoolbox approach which was macOS-only and silently dropped alpha.
+        // alpha_support:true auto-enables this; generate_hevc_stacked:true also triggers it.
+        // Always use -vcodec libvpx-vp9 decoder for WebM so BlockAdditional alpha is preserved.
+        $stackedFilter = '[0:v]format=pix_fmts=yuva444p[rgba];[rgba]split[color][amask];[amask]alphaextract[alpha];[color][alpha]vstack';
+        $wantsHevcStacked = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_stacked', false);
+        if ($wantsHevcStacked && strtolower($file->extension()) === 'webm') {
+            $hevcStackedFinal = $this->hevcStackedPath($file);
+            if ($force || !file_exists($hevcStackedFinal)) {
+                $tmp = $hevcStackedFinal . '.tmp';
                 $cmd = sprintf(
-                    '%s -y %s -i %s -vf "format=yuva420p" -vcodec hevc_videotoolbox -allow_sw 1 -alpha_quality 0.75 -an -tag:v hvc1 -f mov %s 2>&1',
+                    '%s -y -vcodec libvpx-vp9 -i %s -filter_complex "%s" -pix_fmt yuv420p -c:v libx265 -preset slow -crf 28 -tag:v hvc1 -movflags +faststart -an -f mp4 %s 2>&1',
                     escapeshellcmd($ffmpeg),
-                    $decoderFlag,
                     escapeshellarg($inputPath),
+                    $stackedFilter,
                     escapeshellarg($tmp)
                 );
                 exec($cmd, $out, $ret);
-                $this->log("hevc: code={$ret} | " . implode(' ', array_slice($out, -3)));
+                $this->log("hevc-stacked: code={$ret} | " . implode(' ', array_slice($out, -3)));
                 if ($ret === 0 && file_exists($tmp)) {
-                    @unlink($hevcFinal);
-                    rename($tmp, $hevcFinal);
+                    @unlink($hevcStackedFinal);
+                    rename($tmp, $hevcStackedFinal);
+                } else {
+                    @unlink($tmp);
+                }
+            }
+        }
+
+        // 3b) AV1 stacked (libaom-av1) — optional, WebM sources only
+        // Primary format for Safari 16+, Chrome, Firefox. Same stacked-alpha encoding.
+        $wantsAv1 = option('rllngr.videozer.generate_av1_stacked', false);
+        if ($wantsAv1 && strtolower($file->extension()) === 'webm') {
+            $av1Final = $this->av1Path($file);
+            if ($force || !file_exists($av1Final)) {
+                $tmp = $av1Final . '.tmp';
+                $cmd = sprintf(
+                    '%s -y -vcodec libvpx-vp9 -i %s -filter_complex "%s" -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 4 -crf 45 -movflags +faststart -an -f mp4 %s 2>&1',
+                    escapeshellcmd($ffmpeg),
+                    escapeshellarg($inputPath),
+                    $stackedFilter,
+                    escapeshellarg($tmp)
+                );
+                exec($cmd, $out, $ret);
+                $this->log("av1-stacked: code={$ret} | " . implode(' ', array_slice($out, -3)));
+                if ($ret === 0 && file_exists($tmp)) {
+                    @unlink($av1Final);
+                    rename($tmp, $av1Final);
                 } else {
                     @unlink($tmp);
                 }
@@ -376,20 +434,34 @@ class Videozer
             $this->log("webm: skipped — source is WebM with alpha, serving original directly");
         }
 
-        // 3) HEVC Alpha MOV — optional, WebM sources only
-        // alpha_support:true auto-enables this; generate_hevc_alpha:true also triggers it.
-        // For alpha WebM: use libvpx-vp9 to properly decode BlockAdditional alpha.
-        $wantsHevc = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_alpha', false);
-        if ($wantsHevc && strtolower($file->extension()) === 'webm') {
-            $hevcFinal = $this->hevcPath($file);
-            if ($force || !file_exists($hevcFinal)) {
-                $tmp = escapeshellarg($hevcFinal . '.tmp');
-                $out = escapeshellarg($hevcFinal);
+        // 3) HEVC stacked (libx265, cross-platform) — optional, WebM sources only
+        // Always use libvpx-vp9 decoder to ensure BlockAdditional alpha is preserved.
+        $stackedFilter = '[0:v]format=pix_fmts=yuva444p[rgba];[rgba]split[color][amask];[amask]alphaextract[alpha];[color][alpha]vstack';
+        $wantsHevcStacked = option('rllngr.videozer.alpha_support', false) || option('rllngr.videozer.generate_hevc_stacked', false);
+        if ($wantsHevcStacked && strtolower($file->extension()) === 'webm') {
+            $hevcStackedFinal = $this->hevcStackedPath($file);
+            if ($force || !file_exists($hevcStackedFinal)) {
+                $tmp = escapeshellarg($hevcStackedFinal . '.tmp');
+                $out = escapeshellarg($hevcStackedFinal);
                 $parts[] = sprintf(
-                    '%s -y %s -i %s -vf "format=yuva420p" -vcodec hevc_videotoolbox -allow_sw 1 -alpha_quality 0.75 -an -tag:v hvc1 -f mov %s'
+                    '%s -y -vcodec libvpx-vp9 -i %s -filter_complex "%s" -pix_fmt yuv420p -c:v libx265 -preset slow -crf 28 -tag:v hvc1 -movflags +faststart -an -f mp4 %s'
                         . ' && mv -f %s %s',
-                    $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
-                    $tmp, $tmp, $out
+                    $ffmpeg, escapeshellarg($inputPath), $stackedFilter, $tmp, $tmp, $out
+                );
+            }
+        }
+
+        // 3b) AV1 stacked (libaom-av1) — optional, WebM sources only
+        $wantsAv1 = option('rllngr.videozer.generate_av1_stacked', false);
+        if ($wantsAv1 && strtolower($file->extension()) === 'webm') {
+            $av1Final = $this->av1Path($file);
+            if ($force || !file_exists($av1Final)) {
+                $tmp = escapeshellarg($av1Final . '.tmp');
+                $out = escapeshellarg($av1Final);
+                $parts[] = sprintf(
+                    '%s -y -vcodec libvpx-vp9 -i %s -filter_complex "%s" -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 4 -crf 45 -movflags +faststart -an -f mp4 %s'
+                        . ' && mv -f %s %s',
+                    $ffmpeg, escapeshellarg($inputPath), $stackedFilter, $tmp, $tmp, $out
                 );
             }
         }
@@ -649,7 +721,7 @@ class Videozer
 
     public function deleteCached(File $file): void
     {
-        foreach ([$this->mp4Path($file), $this->webmPath($file), $this->hevcPath($file), $this->posterPath($file), $this->lastFramePath($file)] as $path) {
+        foreach ([$this->mp4Path($file), $this->webmPath($file), $this->hevcPath($file), $this->hevcStackedPath($file), $this->av1Path($file), $this->posterPath($file), $this->lastFramePath($file)] as $path) {
             if (file_exists($path)) {
                 @unlink($path);
                 $this->log("Deleted: {$path}");

@@ -26,7 +26,7 @@ F::loadClasses([
 
 App::plugin('rllngr/videozer', [
     'info' => [
-        'version' => '1.2.0',
+        'version' => '1.3.0',
     ],
 
     'options' => [
@@ -57,9 +57,15 @@ App::plugin('rllngr/videozer', [
         // Poster frame format: 'jpg', 'png', or 'webp'. Use 'webp' or 'png' to preserve alpha.
         // Overridden to 'png' automatically when alpha_support is true.
         'poster_format'      => 'jpg',
-        // Convert WebM (with alpha) to HEVC H.265 MOV for Safari alpha-channel support.
-        // Uses hevc_videotoolbox (macOS hardware). Only triggers on .webm uploads.
+        // Generate HEVC stacked-alpha MP4 (libx265, cross-platform) for Safari fallback.
+        // Encodes colour+alpha as double-height video, decoded by the stacked-alpha-video web component.
+        // Replaces the old hevc_videotoolbox approach (macOS-only, broken alpha).
         // Enabled automatically when alpha_support is true.
+        'generate_hevc_stacked' => false,
+        // Generate AV1 stacked-alpha MP4 (libaom-av1) — primary format for Safari 16+, Chrome, Firefox.
+        // Slower to encode but better compression. Set generate_hevc_stacked:true as fallback.
+        'generate_av1_stacked' => false,
+        // Deprecated: use generate_hevc_stacked instead. Kept for reference only; no longer triggers encoding.
         'generate_hevc_alpha' => false,
         // WebM CRF quality.
         'webm_crf'           => 33,
@@ -238,11 +244,25 @@ App::plugin('rllngr/videozer', [
             return $vz->hasLastFrame($this) ? $vz->lastFrameUrl($this) : null;
         },
 
-        // HEVC H.265 MOV URL for Safari alpha-channel support, or null if not generated.
+        // HEVC H.265 MOV URL (legacy hevc_videotoolbox output), or null if not present.
         /** @kql-allowed */
         'videozHevcUrl' => function (): ?string {
             $vz = new \Rllngr\Videozer\Videozer();
             return $vz->hasHevc($this) ? $vz->hevcUrl($this) : null;
+        },
+
+        // HEVC stacked-alpha MP4 URL (libx265, cross-platform Safari fallback), or null.
+        /** @kql-allowed */
+        'videozHevcStackedUrl' => function (): ?string {
+            $vz = new \Rllngr\Videozer\Videozer();
+            return $vz->hasHevcStacked($this) ? $vz->hevcStackedUrl($this) : null;
+        },
+
+        // AV1 stacked-alpha MP4 URL (libaom-av1, Safari 16+ / Chrome / Firefox), or null.
+        /** @kql-allowed */
+        'videozAv1Url' => function (): ?string {
+            $vz = new \Rllngr\Videozer\Videozer();
+            return $vz->hasAv1($this) ? $vz->av1Url($this) : null;
         },
 
         // Poster URL. Always returns the expected URL — the browser handles 404 via @error.
@@ -344,7 +364,7 @@ App::plugin('rllngr/videozer', [
         //  in $page->files() — but this guard handles any edge case.)
         'videozFiles' => function () {
             return $this->files()->filter(function ($file) {
-                return !preg_match('/(-compressed\.mp4|-opt\.webm|-hevc\.mov|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/', $file->filename());
+                return !preg_match('/(-compressed\.mp4|-opt\.webm|-hevc\.mov|-hevc-stacked\.mp4|-av1-stacked\.mp4|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/', $file->filename());
             });
         },
     ],
@@ -410,12 +430,14 @@ App::plugin('rllngr/videozer', [
                         $vz = new \Rllngr\Videozer\Videozer();
                         $vz->process($file, $preset ?: null, $force);
                         return [
-                            'status'   => 'success',
-                            'original' => $file->url(),
-                            'mp4'      => $vz->hasMp4($file) ? $vz->mp4Url($file) : null,
-                            'webm'     => $vz->hasWebm($file) ? $vz->webmUrl($file) : null,
-                            'hevc'     => $vz->hasHevc($file) ? $vz->hevcUrl($file) : null,
-                            'poster'   => $vz->hasPoster($file) ? $vz->posterUrl($file) : null,
+                            'status'      => 'success',
+                            'original'    => $file->url(),
+                            'mp4'         => $vz->hasMp4($file) ? $vz->mp4Url($file) : null,
+                            'webm'        => $vz->hasWebm($file) ? $vz->webmUrl($file) : null,
+                            'hevc'        => $vz->hasHevc($file) ? $vz->hevcUrl($file) : null,
+                            'hevcStacked' => $vz->hasHevcStacked($file) ? $vz->hevcStackedUrl($file) : null,
+                            'av1'         => $vz->hasAv1($file) ? $vz->av1Url($file) : null,
+                            'poster'      => $vz->hasPoster($file) ? $vz->posterUrl($file) : null,
                         ];
                     } catch (\Exception $e) {
                         return ['status' => 'error', 'message' => $e->getMessage()];
