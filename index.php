@@ -154,6 +154,8 @@ App::plugin('rllngr/videozer', [
 
         'file.delete:after' => function (File $file) {
             try {
+                if ($file->type() !== 'video') return;
+
                 // Safety net: remove any orphaned Kirby .txt meta files left behind
                 // after deleting the video and its generated variants (poster, last frame).
                 // Kirby normally cleans up the video's own .txt, but generated files
@@ -167,7 +169,9 @@ App::plugin('rllngr/videozer', [
                 foreach (glob($contentDir . '/*.txt') as $txtFile) {
                     $basename = basename($txtFile, '.txt');
                     // Skip the page's own content file (e.g. project.txt)
-                    if ($basename === $page->slug() || $basename === $page->template()->name()) continue;
+                    // intendedTemplate() retourne le nom du blueprint même sans fichier PHP template
+                    // (setup headless) — template() peut retourner 'default' à tort dans ce cas.
+                    if ($basename === $page->slug() || $basename === $page->intendedTemplate()->name()) continue;
                     // If no corresponding file exists → orphan → delete
                     if (!file_exists($contentDir . '/' . $basename)) {
                         @unlink($txtFile);
@@ -301,9 +305,17 @@ App::plugin('rllngr/videozer', [
         // Returns null for other types (Kirby shows default icon).
         'videozPanelImage' => function (): ?\Kirby\Cms\File {
             if ($this->type() === 'video') {
-                $ext            = option('rllngr.videozer.poster_format', 'jpg');
-                $posterFilename = $this->name() . '-poster.' . $ext;
-                return $this->parent()->image($posterFilename);
+                $baseName = $this->name() . '-poster.';
+                // Try configured format first, then fall back to the other common format.
+                // Posters may have been generated under a different format if the config changed.
+                $primary   = option('rllngr.videozer.poster_format', 'jpg');
+                $fallbacks = ['png', 'jpg', 'jpeg', 'webp'];
+                $exts      = array_unique(array_merge([$primary], $fallbacks));
+                foreach ($exts as $ext) {
+                    $file = $this->parent()->image($baseName . $ext);
+                    if ($file !== null) return $file;
+                }
+                return null;
             }
             if ($this->type() === 'image') {
                 return $this;
