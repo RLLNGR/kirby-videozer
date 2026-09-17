@@ -25,9 +25,11 @@ F::loadClasses([
 ]);
 
 App::plugin('rllngr/videozer', [
-    'info' => [
-        'version' => '1.3.0',
-    ],
+    // No `info.version` here - the git tag is the version, and composer is
+    // what tells Kirby which one is installed. A literal in this file is a
+    // second answer that goes stale the moment a tag is cut: measured, this
+    // said 1.3.0 while `$kirby->plugin('rllngr/videozer')->version()` answered
+    // the installed 1.4.1.
 
     'options' => [
         // Master switch for transparency support.
@@ -303,6 +305,11 @@ App::plugin('rllngr/videozer', [
         // For videos: returns the poster frame (copied to content dir by videozer).
         // For images: returns the file itself so Kirby shows the image preview.
         // Returns null for other types (Kirby shows default icon).
+        //
+        // Allowed over KQL too: a cover may be a video, and a page's share
+        // picture has to be a still - so a headless front end asks the same
+        // question the panel does rather than keeping a second rule of its own.
+        /** @kql-allowed */
         'videozPanelImage' => function (): ?\Kirby\Cms\File {
             if ($this->type() === 'video') {
                 $baseName = $this->name() . '-poster.';
@@ -374,9 +381,54 @@ App::plugin('rllngr/videozer', [
         // Files on this page excluding any videozer-generated variants.
         // (Generated files live in video-cache/, so they normally don't appear
         //  in $page->files() — but this guard handles any edge case.)
+        /**
+         * A variant is one because it belongs to a video, not because of its
+         * name.
+         *
+         * This is what a files field on a page queries, so whatever it drops is
+         * a file the editor cannot pick and is told nothing about - and it used
+         * to drop by name alone. An upload called `serie-last.jpg` or
+         * `hero-poster.jpg` is an ordinary picture, and it silently never
+         * appeared in the picker. No error and no empty state: just a file that
+         * is not there.
+         *
+         * So the suffix is stripped and a video of that name has to stand
+         * beside it on the same page. Longest suffix first, or `-hevc` claims
+         * `-hevc-stacked`.
+         *
+         * Note that only `-poster` and `-last` are ever written into the
+         * content directory (`$file->parent()->root()`); everything else lives
+         * in `video-cache/` and is never in `$page->files()` at all. So the
+         * five video suffixes could only ever have matched somebody's own
+         * upload.
+         *
+         * A poster whose video has been deleted comes back into view, which is
+         * right: it is then an orphan the editor can see and remove.
+         */
         'videozFiles' => function () {
-            return $this->files()->filter(function ($file) {
-                return !preg_match('/(-compressed\.mp4|-opt\.webm|-hevc\.mov|-hevc-stacked\.mp4|-av1-stacked\.mp4|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/', $file->filename());
+            $videos = [];
+
+            foreach ($this->files() as $file) {
+                if ($file->type() === 'video') {
+                    $videos[$file->name()] = true;
+                }
+            }
+
+            return $this->files()->filter(function ($file) use ($videos) {
+                if (preg_match(
+                    '/(-compressed\.mp4|-opt\.webm|-hevc-stacked\.mp4|-av1-stacked\.mp4|-hevc\.mov|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/',
+                    $file->filename()
+                ) !== 1) {
+                    return true;
+                }
+
+                $source = preg_replace(
+                    '/(-hevc-stacked|-av1-stacked|-compressed|-opt|-hevc|-poster|-last)$/',
+                    '',
+                    $file->name()
+                );
+
+                return isset($videos[$source]) === false;
             });
         },
     ],
