@@ -24,6 +24,60 @@ F::loadClasses([
     'Rllngr\\Videozer\\Videozer' => __DIR__ . '/src/Videozer.php',
 ]);
 
+/**
+ * Files on a page or on the site, less the variants videozer wrote itself.
+ *
+ * Registered on **both** models, because a files field can sit on either and
+ * its query is one string: `model.videozFiles` is what a blueprint says, and
+ * `model` is Kirby's own name for whatever the field is attached to. Given
+ * `page.videozFiles`, the site's own cover field resolved `page` to nothing
+ * and the picker answered "Your query must return a set of files".
+ *
+ * A variant is one because it belongs to a video, not because of its name.
+ * This is what a files field queries, so whatever it drops is a file the
+ * editor cannot pick and is told nothing about - and it used to drop by name
+ * alone. An upload called `serie-last.jpg` or `hero-poster.jpg` is an ordinary
+ * picture, and it silently never appeared in the picker. No error and no empty
+ * state: just a file that is not there.
+ *
+ * So the suffix is stripped and a video of that name has to stand beside it,
+ * on the same model. Longest suffix first, or `-hevc` claims `-hevc-stacked`.
+ *
+ * Note that only `-poster` and `-last` are ever written into the content
+ * directory (`$file->parent()->root()`); everything else lives in
+ * `video-cache/` and is never in `files()` at all. So the five video suffixes
+ * could only ever have matched somebody's own upload.
+ *
+ * A poster whose video has been deleted comes back into view, which is right:
+ * it is then an orphan the editor can see and remove.
+ */
+$videozFiles = function () {
+    $videos = [];
+
+    foreach ($this->files() as $file) {
+        if ($file->type() === 'video') {
+            $videos[$file->name()] = true;
+        }
+    }
+
+    return $this->files()->filter(function ($file) use ($videos) {
+        if (preg_match(
+            '/(-compressed\\.mp4|-opt\\.webm|-hevc-stacked\\.mp4|-av1-stacked\\.mp4|-hevc\\.mov|-poster\\.(jpg|png|webp)|-last\\.(jpg|png|webp))$/',
+            $file->filename()
+        ) !== 1) {
+            return true;
+        }
+
+        $source = preg_replace(
+            '/(-hevc-stacked|-av1-stacked|-compressed|-opt|-hevc|-poster|-last)$/',
+            '',
+            $file->name()
+        );
+
+        return isset($videos[$source]) === false;
+    });
+};
+
 App::plugin('rllngr/videozer', [
     // No `info.version` here - the git tag is the version, and composer is
     // what tells Kirby which one is installed. A literal in this file is a
@@ -375,62 +429,14 @@ App::plugin('rllngr/videozer', [
 
     ],
 
-    // ── Page method ────────────────────────────────────────────────────────────
+    // ── Page and site method ───────────────────────────────────────────────────
 
     'pageMethods' => [
-        // Files on this page excluding any videozer-generated variants.
-        // (Generated files live in video-cache/, so they normally don't appear
-        //  in $page->files() — but this guard handles any edge case.)
-        /**
-         * A variant is one because it belongs to a video, not because of its
-         * name.
-         *
-         * This is what a files field on a page queries, so whatever it drops is
-         * a file the editor cannot pick and is told nothing about - and it used
-         * to drop by name alone. An upload called `serie-last.jpg` or
-         * `hero-poster.jpg` is an ordinary picture, and it silently never
-         * appeared in the picker. No error and no empty state: just a file that
-         * is not there.
-         *
-         * So the suffix is stripped and a video of that name has to stand
-         * beside it on the same page. Longest suffix first, or `-hevc` claims
-         * `-hevc-stacked`.
-         *
-         * Note that only `-poster` and `-last` are ever written into the
-         * content directory (`$file->parent()->root()`); everything else lives
-         * in `video-cache/` and is never in `$page->files()` at all. So the
-         * five video suffixes could only ever have matched somebody's own
-         * upload.
-         *
-         * A poster whose video has been deleted comes back into view, which is
-         * right: it is then an orphan the editor can see and remove.
-         */
-        'videozFiles' => function () {
-            $videos = [];
+        'videozFiles' => $videozFiles,
+    ],
 
-            foreach ($this->files() as $file) {
-                if ($file->type() === 'video') {
-                    $videos[$file->name()] = true;
-                }
-            }
-
-            return $this->files()->filter(function ($file) use ($videos) {
-                if (preg_match(
-                    '/(-compressed\.mp4|-opt\.webm|-hevc-stacked\.mp4|-av1-stacked\.mp4|-hevc\.mov|-poster\.(jpg|png|webp)|-last\.(jpg|png|webp))$/',
-                    $file->filename()
-                ) !== 1) {
-                    return true;
-                }
-
-                $source = preg_replace(
-                    '/(-hevc-stacked|-av1-stacked|-compressed|-opt|-hevc|-poster|-last)$/',
-                    '',
-                    $file->name()
-                );
-
-                return isset($videos[$source]) === false;
-            });
-        },
+    'siteMethods' => [
+        'videozFiles' => $videozFiles,
     ],
 
     // ── Panel API routes (authenticated) ───────────────────────────────────────

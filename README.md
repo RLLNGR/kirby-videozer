@@ -93,13 +93,16 @@ return [
 
 ## Usage
 
-### Page method
+### Page and site method
 
-Use `$page->videozFiles()` to retrieve files excluding any generated variants (useful for gallery fields):
+Use `$page->videozFiles()` or `$site->videozFiles()` to retrieve files excluding any
+generated variants (useful for cover and gallery fields). In a blueprint, write the
+query as `model.videozFiles`: `model` is Kirby's own name for whatever the field is
+attached to, so one field definition serves a page and the site alike.
 
 ```php
 // In a blueprint field:
-query: page.videozFiles
+query: model.videozFiles
 
 // In a template:
 foreach ($page->videozFiles() as $file) { ... }
