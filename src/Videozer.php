@@ -381,7 +381,10 @@ class Videozer
         $audioOpts  = $stripAudio
             ? '-an'
             : '-c:a aac -b:a ' . option('rllngr.videozer.audio_bitrate', '96k');
-        $logFile    = escapeshellarg(dirname(__DIR__) . '/videozer.log');
+        // The shell opens this before it runs anything: a log it cannot open is
+        // a job that never starts, with nothing said anywhere. So a log that
+        // cannot be written is swapped for /dev/null rather than trusted.
+        $logFile    = escapeshellarg($this->logPath() ?? '/dev/null');
 
         // Create cache directory now (synchronous, fast)
         if (!is_dir($cacheDir)) {
@@ -792,12 +795,42 @@ class Videozer
 
     // ── Logging ────────────────────────────────────────────────────────────────
 
+    /**
+     * Where the log goes, or null when there is nowhere writable to put it.
+     *
+     * Kirby's own logs root by default, which the PHP user already has to be
+     * able to write. It used to be the plugin's directory, which is owned by
+     * whoever deployed it: there the background shell could not open its log,
+     * refused to run, and no video was ever processed.
+     */
+    public function logPath(): ?string
+    {
+        $option = option('rllngr.videozer.log');
+        if ($option === false) return null;
+
+        $path = $option ?: (kirby()->root('logs') ?? kirby()->root('site') . '/logs') . '/videozer.log';
+
+        $dir = dirname($path);
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+        if (!file_exists($path)) @touch($path);
+
+        if (is_writable($path)) return $path;
+
+        static $warned = false;
+        if (!$warned) {
+            error_log('Videozer: log not writable, falling back to error_log: ' . $path);
+            $warned = true;
+        }
+        return null;
+    }
+
     protected function log(string $message): void
     {
-        @file_put_contents(
-            dirname(__DIR__) . '/videozer.log',
-            date('c') . ' ' . $message . PHP_EOL,
-            FILE_APPEND
-        );
+        $path = $this->logPath();
+        if ($path === null) {
+            error_log('Videozer: ' . $message);
+            return;
+        }
+        @file_put_contents($path, date('c') . ' ' . $message . PHP_EOL, FILE_APPEND);
     }
 }

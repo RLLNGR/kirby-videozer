@@ -135,6 +135,9 @@ App::plugin('rllngr/videozer', [
         'gallery_field'      => null,
         // Custom base directory for the video cache. null = {webroot}/video-cache/.
         'cache_dir'          => null,
+        // Log file. null = {kirby logs root}/videozer.log, false = no log file (PHP's error_log only).
+        // Not the plugin's own directory: that belongs to whoever deployed it, rarely the PHP user.
+        'log'                => null,
     ],
 
     // ── Hooks ─────────────────────────────────────────────────────────────────

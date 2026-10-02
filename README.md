@@ -182,7 +182,7 @@ The plugin exposes three authenticated Panel API endpoints:
 
 ## Troubleshooting
 
-- Check `site/plugins/videozer/videozer.log` for processing errors.
+- Check `videozer.log` in Kirby's logs root (`site/logs/` by default, or wherever `roots.logs` points) for processing errors. Set `rllngr.videozer.log` to another path, or `false` to use PHP's `error_log` only. If the file cannot be written, the plugin logs to `error_log` instead and still processes the video.
 - If FFmpeg is not found, set `rllngr.videozer.ffmpeg` to the full binary path.
 - Uploads trigger `processBackground()` — FFmpeg runs in a detached shell so the Panel request returns immediately. The poster and srcset will appear once the background job completes.
 - The API routes (`/api/videozer/optimize`, `/api/videozer/optimize-all`) use the synchronous `process()` method — suited for scripts and manual re-processing.
