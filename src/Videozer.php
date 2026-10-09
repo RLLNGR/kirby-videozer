@@ -142,6 +142,30 @@ class Videozer
         return file_exists($this->posterPath($file));
     }
 
+    /**
+     * The poster copy in the page's content folder (panel preview, srcset).
+     * Restores it from the cache when it is missing: the background job copies
+     * it to the folder the page had when the video was uploaded, and publishing
+     * or renaming the page in between moves that folder away.
+     */
+    public function contentPoster(File $file): ?File
+    {
+        $filename = $file->name() . '-poster.' . $this->posterExtension();
+
+        if ($image = $file->parent()->image($filename)) {
+            return $image;
+        }
+
+        $target = $file->parent()->root() . '/' . $filename;
+        if (!$this->hasPoster($file) || !@copy($this->posterPath($file), $target)) {
+            return null;
+        }
+
+        // The parent's file list was read before the copy
+        $image = File::factory(['filename' => $filename, 'parent' => $file->parent()]);
+        return $image->type() === 'image' ? $image : null;
+    }
+
     public function hevcPath(File $file): string
     {
         return $this->cacheDir($file) . '/' . $file->name() . '-hevc.mov';
@@ -237,7 +261,7 @@ class Videozer
         if ($force || !file_exists($mp4Final)) {
             $tmp = $mp4Final . '.tmp';
             $cmd = sprintf(
-                '%s -y -i %s -c:v libx264 -preset %s -crf %d -profile:v high -level 4.0'
+                '%s -y -i %s -c:v libx264 -preset %s -crf %d -pix_fmt yuv420p -profile:v high -level 4.0'
                     . ' -vf "scale=min(%d\,iw):-2" %s -movflags +faststart -f mp4 %s 2>&1',
                 escapeshellcmd($ffmpeg),
                 escapeshellarg($inputPath),
@@ -375,7 +399,13 @@ class Videozer
 
         $config     = $this->getConfig($preset);
         $cacheDir   = $this->cacheDir($file);
-        $inputPath  = $file->root();
+        $sourcePath = $file->root();
+        // Every step reads a snapshot of the source, not the content file itself:
+        // publishing, renaming or sorting the page moves its folder, and a step
+        // that starts minutes later would find nothing at the old path. A hard
+        // link costs nothing; it falls back to a copy across filesystems.
+        $snapshotDir = kirby()->root('cache') . '/videozer';
+        $inputPath   = $snapshotDir . '/' . str_replace('/', '_', $file->id()) . '.' . uniqid() . '.' . $file->extension();
         $ffmpeg     = escapeshellcmd($this->ffmpegPath);
         $stripAudio = option('rllngr.videozer.strip_audio', false);
         $audioOpts  = $stripAudio
@@ -390,8 +420,18 @@ class Videozer
         if (!is_dir($cacheDir)) {
             mkdir($cacheDir, 0755, true);
         }
+        if (!is_dir($snapshotDir)) {
+            mkdir($snapshotDir, 0755, true);
+        }
+        // Taken now, not in the background shell: the page can move before it starts
+        if (!@link($sourcePath, $inputPath) && !@copy($sourcePath, $inputPath)) {
+            $inputPath = $sourcePath;
+        }
 
-        $parts = [];
+        // Still frames go first: they take seconds, and the panel preview and
+        // the front-end poster should not wait for minutes of encoding
+        $frameParts = [];
+        $parts      = [];
 
         // 1) Compressed MP4
         $mp4Final = $this->mp4Path($file);
@@ -399,7 +439,7 @@ class Videozer
             $tmp = escapeshellarg($mp4Final . '.tmp');
             $out = escapeshellarg($mp4Final);
             $parts[] = sprintf(
-                '%s -y -i %s -c:v libx264 -preset %s -crf %d -profile:v high -level 4.0'
+                '%s -y -i %s -c:v libx264 -preset %s -crf %d -pix_fmt yuv420p -profile:v high -level 4.0'
                     . ' -vf "scale=min(%d\,iw):-2" %s -movflags +faststart -f mp4 %s'
                     . ' && mv -f %s %s',
                 $ffmpeg, escapeshellarg($inputPath),
@@ -469,7 +509,7 @@ class Videozer
             }
         }
 
-        // 4) Poster frame (use fixed 1s timestamp to avoid needing ffprobe)
+        // 4) Poster frame — runs first, see $frameParts (use fixed 1s timestamp to avoid needing ffprobe)
         // Also copy to the page's content directory so Kirby can use it as a panel preview image.
         // For alpha WebM: use libvpx-vp9 software decoder to preserve transparency.
         $posterPath    = $this->posterPath($file);
@@ -483,7 +523,7 @@ class Videozer
                 : "scale=min(%d\\,iw):-2";
             $tmp     = escapeshellarg($posterPath . '.tmp.' . $ext);
             $out     = escapeshellarg($posterPath);
-            $parts[] = sprintf(
+            $frameParts[] = sprintf(
                 '%s -ss 1.0 -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s'
                     . ' && mv -f %s %s && cp -f %s %s',
                 $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
@@ -503,7 +543,7 @@ class Videozer
                 : "scale=min(%d\\,iw):-2";
             $tmp     = escapeshellarg($lastPath . '.tmp.' . $ext);
             $out     = escapeshellarg($lastPath);
-            $parts[] = sprintf(
+            $frameParts[] = sprintf(
                 '%s -sseof -0.1 -y %s -i %s -vframes 1 -vf "' . $scaleFilter . '" %s -update 1 %s %s'
                     . ' && mv -f %s %s && cp -f %s %s',
                 $ffmpeg, $decoderFlag, escapeshellarg($inputPath),
@@ -511,7 +551,10 @@ class Videozer
             );
         }
 
+        $parts = array_merge($frameParts, $parts);
+
         if (empty($parts)) {
+            if ($inputPath !== $sourcePath) @unlink($inputPath);
             $this->log("processBackground: nothing to do for {$file->filename()}");
             return;
         }
@@ -520,6 +563,9 @@ class Videozer
         // nohup is not used — PHP-FPM has no controlling terminal and nohup fails
         // with "Inappropriate ioctl for device" in that context.
         $script = implode(' ; ', $parts);
+        if ($inputPath !== $sourcePath) {
+            $script .= ' ; rm -f ' . escapeshellarg($inputPath);
+        }
         $bgCmd  = 'bash -c ' . escapeshellarg($script) . ' >> ' . $logFile . ' 2>&1 &';
         exec($bgCmd);
 

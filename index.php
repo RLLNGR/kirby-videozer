@@ -152,13 +152,14 @@ App::plugin('rllngr/videozer', [
                 if (!$vz->matchesTemplate($file)) return;
                 if (!$vz->isAvailable()) return;
 
+                // Kirby 5 models are immutable: every write returns a new object and
+                // the old one refuses further writes, so `$file` is reassigned each time
+
                 // Assign file blueprint (optional)
                 $tpl = option('rllngr.videozer.change_template', false);
-                if ($tpl) {
+                if ($tpl && $file->template() !== $tpl) {
                     try {
-                        kirby()->impersonate('kirby', function () use ($file, $tpl) {
-                            $file->changeTemplate($tpl);
-                        });
+                        $file = kirby()->impersonate('kirby', fn () => $file->changeTemplate($tpl));
                     } catch (\Throwable $e) {
                         error_log('Videozer: changeTemplate error: ' . $e->getMessage());
                     }
@@ -168,9 +169,7 @@ App::plugin('rllngr/videozer', [
                 if (!$file->content()->get('orientation')->isNotEmpty()) {
                     try {
                         $orientation = $vz->detectOrientation($file);
-                        kirby()->impersonate('kirby', function () use ($file, $orientation) {
-                            $file->update(['orientation' => $orientation]);
-                        });
+                        $file = kirby()->impersonate('kirby', fn () => $file->update(['orientation' => $orientation]));
                     } catch (\Throwable $e) {
                         error_log('Videozer: orientation detect error: ' . $e->getMessage());
                     }
@@ -196,9 +195,7 @@ App::plugin('rllngr/videozer', [
                 // Re-detect orientation when file is replaced
                 try {
                     $orientation = $vz->detectOrientation($file);
-                    kirby()->impersonate('kirby', function () use ($file, $orientation) {
-                        $file->update(['orientation' => $orientation]);
-                    });
+                    $file = kirby()->impersonate('kirby', fn () => $file->update(['orientation' => $orientation]));
                 } catch (\Throwable $e) {
                     error_log('Videozer: orientation detect error: ' . $e->getMessage());
                 }
@@ -341,8 +338,7 @@ App::plugin('rllngr/videozer', [
         /** @kql-allowed */
         'videozPosterSrcset' => function (): ?string {
             if ($this->type() !== 'video') return null;
-            $ext        = option('rllngr.videozer.poster_format', 'jpg');
-            $posterFile = $this->parent()->image($this->name() . '-poster.' . $ext);
+            $posterFile = (new \Rllngr\Videozer\Videozer())->contentPoster($this);
             return $posterFile ? $posterFile->srcset() : null;
         },
 
@@ -379,7 +375,8 @@ App::plugin('rllngr/videozer', [
                     $file = $this->parent()->image($baseName . $ext);
                     if ($file !== null) return $file;
                 }
-                return null;
+                // Not in the content folder (yet): restore it from the cache
+                return (new \Rllngr\Videozer\Videozer())->contentPoster($this);
             }
             if ($this->type() === 'image') {
                 return $this;
